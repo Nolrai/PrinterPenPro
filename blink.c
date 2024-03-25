@@ -6,10 +6,11 @@
 #define TMC5160_REG_STATUS      0x01 // STATUS register address
 #define TMC5160_SPI_READ_MASK   0x80 // Read command mask
 
-#define GYRO_SPI_READ_MASK      0x80 // Read command mask
+#define GYRO_READ_MASK      0x80 // Read command mask
 #define GYRO_WHO_AM_I           0x0F // Reg name from datasheet
-#define GYRO_WHO_AM_I_EXPECTED  0x96 // Fixed Who am i result.
+#define GYRO_WHO_AM_I_EXPECTED  0x69 // Fixed Who am i result.
 
+typedef unsigned char word8;
 
 void SPI_init() {
 
@@ -29,14 +30,13 @@ void SPI_init() {
     UCA0BR0 |= 0x20;                          // /2
     UCA0BR1 = 0;                              //
     UCA0MCTL = 0;                             // No modulation must be cleared for SPI
-    UCA0CTL1 &= ~UCSWRST;                     // **Initialize USCI state machine**
+    UCA0CTL1 &= ~UCSWRST;                     // **Initialize USCI state machine** // Release UCA0 from reset
     IE2 |= UCA0RXIE;                          // Enable USCI0 RX interrupt
-    UCA0CTL1 &= ~UCSWRST;                  // Release UCA0 from reset
 }
 
 // This just handles using the UCA0 for 2 byte command. It doesn't know which chip its talking too, or what any of the addresses mean,
 // or even which direction we care about.
-unsigned char spi_chunk(unsigned char address, unsigned char* data) {
+unsigned char spi_chunk(word8 address, word8* data) {
 
     while (!(IFG2 & UCA0TXIFG)); //Do we want to sleep instead of busy waiting?
     UCA0TXBUF = address;                        // Load address into TX buffer
@@ -49,17 +49,28 @@ unsigned char spi_chunk(unsigned char address, unsigned char* data) {
     return 0;
 }
 
+void setBitEndian(int msb) {
+    if ((UCA0CTL0 && UCMSB) != msb) {
+        UCA0CTL1 |= UCSWRST; // put USCI0 in reset, so we can change settings.
+        UCA0CTL0 = msb ? UCA0CTL0 | UCMSB : UCA0CTL0 & ~UCMSB;
+        UCA0CTL1 &= UCSWRST; // Release UCA0 from reset
+    }
+}
+
 void select_gyro () {
+    setBitEndian(0);
     P1OUT &= ~BIT0; // Set Gyro CS low
-    P1OUT |= BIT3; // Set Motor CS high
+    P1OUT |= BIT3; // Make sure Motor CS is high
 }
 
 void select_motor () {
-    P1OUT |= BIT0; // Set Gyro CS high
+    setBitEndian(0);
+    P1OUT |= BIT0; // Make sure Gyro CS is high
     P1OUT &= ~BIT3; // Set Motor CS low
 }
 
 void deselect_io () {
+    // Set both CS pins high
     P1OUT |= BIT0 | BIT3;
 }
 
@@ -69,10 +80,114 @@ unsigned char gyro_who_am_i() {
 
     select_gyro ();
     spi_chunk(GYRO_WHO_AM_I | GYRO_SPI_READ_MASK, &ret);
-//    deselect_io ();
+    deselect_io ();
 
     return ret;
 }
+
+const word8 FIFO_CTRL = 0x06;
+
+typedef struct {
+    unsigned waterline:12; // An interrupt is raised when this many points are in the FIFO.
+    unsigned reserved0:2;
+    unsigned pedo_flags:2;
+    unsigned acc_decimation:3;
+    unsigned gyro_decimation:3;
+    unsigned reserved1:2;
+    unsigned third_set_decimation:3;
+    unsigned fourth_set_decimation:3;
+    unsigned high_byte_only:1;
+    unsigned reserved2:1;
+    unsigned fifo_mode:3;
+    unsigned fifo_odr:4;
+    unsigned reserved3:1;
+} fifo_ctrl_block;
+
+typedef enum {
+    DISCARD_ALL = 0,
+    KEEP_ALL = 1,
+    KEEP_HALF = 2,
+    KEEP_THIRD = 3,
+    KEEP_FORTH = 4,
+    KEEP_EIGHT = 5,
+    KEEP_SIXTEENTH = 6,
+    KEEP_THIRTY_SECOND = 7
+} decimation;
+
+typedef enum {
+    BOTH_BYTES = 0,
+    HIGH_ONLY = 1,
+} high_byte_only;
+
+typedef enum {
+  BYPASS_MODE = 0,
+  STOP_WHEN_FULL = 1,
+  STOP_AFTER_TRIGGER = 3, //N.B. this will always fill the buffer before stopping!
+  START_ON_TRIGGER = 4,
+  DISCARD_OLD = 5,
+} fifo_mode;
+
+typedef enum {
+    ODR_DISABLED = 0,
+    HZ_12_5 = 1,
+    HZ_26,
+    HZ_52,
+    HZ_104,
+    HZ_208,
+    HZ_416,
+    HZ_833,
+    KHZ_1_33,
+    KHZ_3_33,
+    KHZ_6_66
+} ODR; //Samples per second. 0 means don't collect data.
+
+static const fifo_ctl_block fifo_default_values = {
+   .waterline = 0x0FFF,
+   .acc_decimation = KEEP_ALL, // save all data points
+   .gyro_decimation = KEEP_ALL, // save all data points
+   .third_set_decimation = DISCARD_ALL, // discard all data points
+   .fourth_set_decimation = DISCARD_ALL, // discard all data points
+   .high_byte_only:1 = BOTH_BYTES, //save high and low byte
+   .fifo_mode:3 = BYPASS_MODE, // Don't collect data yet.
+   .fifo_odr:4 = HZ_416 // I have no idea what rate we want.
+};
+
+void spi_gyro_multibyte(word8 address, word8 data[], length) {
+    select_gyro ();
+
+    // first 8 bits
+    while (!(IFG2 & UCA0TXIFG)); //Do we want to sleep instead of busy waiting?
+    UCA0TXBUF = address;         // Load address into TX buffer
+
+    volitile word8 discard; //To force the reading of the RX buffer even when we aren't using it.
+    for (int i=0; i < length; i++) {
+
+        while (!(IFG2 & UCA0TXIFG)); //Do we want to sleep instead of busy waiting?
+        if (0 == (address & GYRO_READ_MASK)) {
+            UCA0TXBUF = data[i];           // Load data into TX buffer
+        } else {
+            UCA0TXBUF = 0; // Load dummy value into TX buffer to trigger clock pulses.
+        }
+
+        while (!(IFG2 & UCA0RXIFG)); //Do we want to sleep instead of busy waiting?
+        if (0 == (address & GYRO_READ_MASK)) {
+            discard = UCA0RXBUF; // read data from the RX buffer
+        } else {
+            data[i] = UCA0RXBUF; // read data from the RX buffer
+        }
+    }
+
+    deselect_io();
+}
+
+void set_fifo_settings (fifo_mode* settings) {
+    spi_gyro_multibyte(FIFO_CTRL, settings, sizeof(fifo_ctrl_block));
+}
+
+void read_fifo_settings (fifo_mode* settings) {
+    spi_gyro_multibyte(FIFO_CTRL | GYRO_READ_MASK, settings, sizeof(fifo_ctrl_block));
+}
+
 
 void main(void) {
     WDTCTL = WDTPW | WDTHOLD; // Stop watchdog timer
@@ -93,11 +208,12 @@ void main(void) {
     SPI_init(); // Initialize SPI
 
     P1OUT &= ~BIT6; //Set red LED off
+    int Result = 0;
     while (1) {
-
+        Result = gyro_who_am_i();
         if (0 != Result) {
             P1OUT ^= BIT6; // if we got the good result toggle LED D2 (red).
         }
-
+        __delay_cycles(0xFF);
     }
 }
