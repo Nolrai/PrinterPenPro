@@ -4,7 +4,7 @@
 #define TMC5160                 0x02 // Motor Controller flag
 
 #define TMC5160_REG_STATUS      0x01 // STATUS register address
-#define TMC5160_SPI_READ_MASK   0x80 // Read command mask
+#define TMC5160_READ_MASK   0x80 // Read command mask
 
 #define GYRO_READ_MASK      0x80 // Read command mask
 #define GYRO_WHO_AM_I           0x0F // Reg name from datasheet
@@ -12,7 +12,7 @@
 
 typedef unsigned char word8;
 
-void SPI_init() {
+void spi_init() {
 
     //G2553
     P1DIR = 0x1D | BIT6;
@@ -49,37 +49,29 @@ unsigned char spi_chunk(word8 address, word8* data) {
     return 0;
 }
 
-void setBitEndian(int msb) {
-    if ((UCA0CTL0 && UCMSB) != msb) {
-        UCA0CTL1 |= UCSWRST; // put USCI0 in reset, so we can change settings.
-        UCA0CTL0 = msb ? UCA0CTL0 | UCMSB : UCA0CTL0 & ~UCMSB;
-        UCA0CTL1 &= UCSWRST; // Release UCA0 from reset
-    }
-}
-
+inline
 void select_gyro () {
-    setBitEndian(0);
     P1OUT &= ~BIT0; // Set Gyro CS low
     P1OUT |= BIT3; // Make sure Motor CS is high
 }
 
+inline
 void select_motor () {
-    setBitEndian(0);
     P1OUT |= BIT0; // Make sure Gyro CS is high
     P1OUT &= ~BIT3; // Set Motor CS low
 }
 
+inline
 void deselect_io () {
     // Set both CS pins high
     P1OUT |= BIT0 | BIT3;
 }
 
-
 unsigned char gyro_who_am_i() {
     unsigned char ret = 0;
 
     select_gyro ();
-    spi_chunk(GYRO_WHO_AM_I | GYRO_SPI_READ_MASK, &ret);
+    spi_chunk(GYRO_WHO_AM_I | GYRO_READ_MASK, &ret);
     deselect_io ();
 
     return ret;
@@ -141,26 +133,27 @@ typedef enum {
     KHZ_6_66
 } ODR; //Samples per second. 0 means don't collect data.
 
-static const fifo_ctl_block fifo_default_values = {
+static const fifo_ctrl_block fifo_default_values = {
    .waterline = 0x0FFF,
    .acc_decimation = KEEP_ALL, // save all data points
    .gyro_decimation = KEEP_ALL, // save all data points
    .third_set_decimation = DISCARD_ALL, // discard all data points
    .fourth_set_decimation = DISCARD_ALL, // discard all data points
-   .high_byte_only:1 = BOTH_BYTES, //save high and low byte
-   .fifo_mode:3 = BYPASS_MODE, // Don't collect data yet.
-   .fifo_odr:4 = HZ_416 // I have no idea what rate we want.
+   .high_byte_only = BOTH_BYTES, //save high and low byte
+   .fifo_mode = BYPASS_MODE, // Don't collect data yet.
+   .fifo_odr = HZ_416 // I have no idea what rate we want.
 };
 
-void spi_gyro_multibyte(word8 address, word8 data[], length) {
+void spi_gyro_multibyte(word8 address, word8* data, unsigned int length) {
     select_gyro ();
 
     // first 8 bits
     while (!(IFG2 & UCA0TXIFG)); //Do we want to sleep instead of busy waiting?
     UCA0TXBUF = address;         // Load address into TX buffer
 
-    volitile word8 discard; //To force the reading of the RX buffer even when we aren't using it.
-    for (int i=0; i < length; i++) {
+    volatile word8 discard; //To force the reading of the RX buffer even when we aren't using it.
+    int i;
+    for (i=0; i < length; i++) {
 
         while (!(IFG2 & UCA0TXIFG)); //Do we want to sleep instead of busy waiting?
         if (0 == (address & GYRO_READ_MASK)) {
@@ -181,11 +174,11 @@ void spi_gyro_multibyte(word8 address, word8 data[], length) {
 }
 
 void set_fifo_settings (fifo_mode* settings) {
-    spi_gyro_multibyte(FIFO_CTRL, settings, sizeof(fifo_ctrl_block));
+    spi_gyro_multibyte(FIFO_CTRL, (word8*)settings, sizeof(fifo_ctrl_block));
 }
 
 void read_fifo_settings (fifo_mode* settings) {
-    spi_gyro_multibyte(FIFO_CTRL | GYRO_READ_MASK, settings, sizeof(fifo_ctrl_block));
+    spi_gyro_multibyte(FIFO_CTRL | GYRO_READ_MASK, (word8*)settings, sizeof(fifo_ctrl_block));
 }
 
 
@@ -205,15 +198,14 @@ void main(void) {
     BCSCTL1 = CALBC1_16MHZ;                    // Set DCO
     DCOCTL = CALDCO_16MHZ;
 
-    SPI_init(); // Initialize SPI
+    spi_init(); // Initialize SPI
 
     P1OUT &= ~BIT6; //Set red LED off
-    int Result = 0;
+    volatile int Result = 0;
     while (1) {
         Result = gyro_who_am_i();
-        if (0 != Result) {
-            P1OUT ^= BIT6; // if we got the good result toggle LED D2 (red).
+        if (Result < 0xFF) {
+            P1OUT |= BIT6; // if we got the good result turn on LED D2 (red).
         }
-        __delay_cycles(0xFF);
     }
 }
