@@ -63,6 +63,8 @@ unsigned char SPI_transfer(unsigned char add, unsigned char data, unsigned int D
     return UCA0RXBUF;
 }
 
+const SUCCESS = 0;
+
 unsigned long SPI_transferLong(short int addLong,long int dataLong){
     P1OUT &= ~BIT3; // Set CS low
     //if(Dev == TMC5160_READ){
@@ -81,6 +83,7 @@ unsigned long SPI_transferLong(short int addLong,long int dataLong){
         P1OUT |= BIT3; // Set CS high
 
     //}
+    return SUCCESS;
 }
 
 //adc init
@@ -91,10 +94,10 @@ unsigned long SPI_transferLong(short int addLong,long int dataLong){
 
 
 void main(void) {
-    unsigned char Result = 0;
-    unsigned char MtrRb = 0;
-    unsigned int TempRb = 0;
-    int p = 6000;
+    volatile unsigned char Result = 0;
+    volatile unsigned char MtrRb = 0;
+    volatile unsigned int TempRb = 0;
+//    int p = 6000;
     WDTCTL = WDTPW | WDTHOLD; // Stop watchdog timer
 
     if (CALBC1_16MHZ==0xFF) {                 // If calibration constant erased
@@ -111,9 +114,9 @@ void main(void) {
 
     while (1) {
         Result = SPI_transfer(GYRO_WHO_AM_I, GYRO, GYRO_READ);
-        Result++;
+        if (0x69 != Result) continue;
         MtrRb =  SPI_transferLong(0,0);
-        MtrRb++;
+        if (SUCCESS != MtrRb ) continue;
         //Start conversion
         ADC10CTL0 |= ENC + ADC10SC;//enable and start
         __delay_cycles(1000000);

@@ -41,6 +41,7 @@
 *.su
 *.idb
 *.pdb
+Debug/PrinterPenPro_linkInfo.xml
 
 # Kernel Module Compile Results
 *.mod*
