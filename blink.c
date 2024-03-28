@@ -4,13 +4,11 @@
 #define TMC5160                 0x02 // Motor Controller flag
 
 #define TMC5160_REG_STATUS      0x01 // STATUS register address
-#define TMC5160_READ_MASK   0x80 // Read command mask
+#define TMC5160_WRITE_MASK   0x80 // Read command mask
 
 #define GYRO_READ_MASK      0x80 // Read command mask
-#define GYRO_WHO_AM_I           0x0F // Reg name from datasheet
-#define GYRO_WHO_AM_I_EXPECTED  0x69 // Fixed Who am i result.
-
-typedef unsigned char word8;
+#define GYRO_WHO_AM_I           0x0F // Register name from datasheet
+#define GYRO_WHO_AM_I_EXPECTED  0x69 // Who am i result.
 
 void spi_init() {
 
@@ -36,7 +34,7 @@ void spi_init() {
 
 // This just handles using the UCA0 for 2 byte command. It doesn't know which chip its talking too, or what any of the addresses mean,
 // or even which direction we care about.
-unsigned char spi_chunk(word8 address, word8* data) {
+void spi_chunk(unsigned char address, unsigned char* data) {
 
     while (!(IFG2 & UCA0TXIFG)); //Do we want to sleep instead of busy waiting?
     UCA0TXBUF = address;                        // Load address into TX buffer
@@ -46,7 +44,6 @@ unsigned char spi_chunk(word8 address, word8* data) {
     while (!(IFG2 & UCA0RXIFG)); //Do we want to sleep instead of busy waiting?
 
     *data = UCA0RXBUF; // read data from the RX buffer
-    return 0;
 }
 
 inline
@@ -77,7 +74,7 @@ unsigned char gyro_who_am_i() {
     return ret;
 }
 
-const word8 FIFO_CTRL = 0x06;
+const unsigned char FIFO_CTRL = 0x06;
 
 typedef struct {
     unsigned waterline:12; // An interrupt is raised when this many points are in the FIFO.
@@ -141,18 +138,18 @@ static const fifo_ctrl_block fifo_default_values = {
    .fourth_set_decimation = DISCARD_ALL, // discard all data points
    .high_byte_only = BOTH_BYTES, //save high and low byte
    .fifo_mode = BYPASS_MODE, // Don't collect data yet.
-   .fifo_odr = HZ_416 // I have no idea what rate we want.
+   .fifo_odr = HZ_416
 };
 
-void spi_gyro_multibyte(word8 address, word8* data, unsigned int length) {
+void spi_gyro_multibyte(unsigned char address, unsigned char* data, unsigned int length) {
     select_gyro ();
 
     // first 8 bits
     while (!(IFG2 & UCA0TXIFG)); //Do we want to sleep instead of busy waiting?
     UCA0TXBUF = address;         // Load address into TX buffer
 
-    volatile word8 discard; //To force the reading of the RX buffer even when we aren't using it.
-    int i;
+    volatile unsigned char discard; //To force the reading of the RX buffer even when we aren't using it.
+    unsigned int i;
     for (i=0; i < length; i++) {
 
         while (!(IFG2 & UCA0TXIFG)); //Do we want to sleep instead of busy waiting?
@@ -174,11 +171,11 @@ void spi_gyro_multibyte(word8 address, word8* data, unsigned int length) {
 }
 
 void set_fifo_settings (fifo_mode* settings) {
-    spi_gyro_multibyte(FIFO_CTRL, (word8*)settings, sizeof(fifo_ctrl_block));
+    spi_gyro_multibyte(FIFO_CTRL, (unsigned char*)settings, sizeof(fifo_ctrl_block));
 }
 
 void read_fifo_settings (fifo_mode* settings) {
-    spi_gyro_multibyte(FIFO_CTRL | GYRO_READ_MASK, (word8*)settings, sizeof(fifo_ctrl_block));
+    spi_gyro_multibyte(FIFO_CTRL | GYRO_READ_MASK, (unsigned char*)settings, sizeof(fifo_ctrl_block));
 }
 
 
@@ -201,7 +198,7 @@ void main(void) {
     spi_init(); // Initialize SPI
 
     P1OUT &= ~BIT6; //Set red LED off
-    volatile int Result = 0;
+    volatile char Result = 0;
     while (1) {
         Result = gyro_who_am_i();
         if (Result < 0xFF) {
