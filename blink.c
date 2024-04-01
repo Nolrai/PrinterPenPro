@@ -8,7 +8,7 @@
 #define TMC5160_REG_STATUS      0x01 // STATUS register address
 #define TMC5160_SPI_READ_MASK   0x80 // Read command mask
 
-#define GYRO_SPI_READ_MASK      0x80 // Read command mask
+#define GYRO_READ_MASK      0x80 // Read command mask
 #define GYRO_WHO_AM_I           0x0F // Reg name from datasheet
 
 
@@ -45,27 +45,49 @@ void adc_Init(){
     ADC10AE0 = 0x0000;//sets input to temp sensor
 }
 
-unsigned char SPI_transfer(unsigned char add, unsigned char data, unsigned int DevID) {
-
-    // if called before transfer complete add data to buffer or?
-
-    if(DevID == GYRO_READ){
-        P1OUT &= ~BIT0; // Set CS low
-
-        while (!(IFG2 & UCA0TXIFG));
-        UCA0TXBUF = 0x8F;                     // Load data into TX buffer
-        while (!(IFG2 & UCA0TXIFG));
-
-        UCA0TXBUF = 0x55;
-        while (UCA0STAT & UCBUSY);
-        P1OUT |= BIT0; // Set CS high
-    }
-    return UCA0RXBUF;
+void select_gyro () {
+    P1OUT |= BIT3; // Deselect Motor by setting Motor CS HIGH
+    P1OUT &= ~BIT0; // Select gyro by setting Gyro CS LOW
 }
 
-const SUCCESS = 0;
+void select_motor () {
+    P1OUT |= BIT0; // Deselect Gyro by setting Motor CS HIGH
+    P1OUT &= ~BIT3; // Select Motor by setting Gyro CS LOW
+}
 
-unsigned long SPI_transferLong(short int addLong,long int dataLong){
+void deselect_io () {
+    P1OUT |= BIT0 | BIT3; //Set both chip selects HIGH (deselected)
+}
+
+void gyro_spi (unsigned char address, int size, const unsigned char* mosi, unsigned char* miso) {
+
+    select_gyro ();
+
+    while (!(IFG2 & UCA0TXIFG));
+    UCA0TXBUF = address;                     // Load data into TX buffer
+
+    int i;
+    for(i = 0; i < size; i++) {
+
+        while (!(IFG2 & UCA0TXIFG));
+        UCA0TXBUF = mosi[i];
+        while (UCA0STAT & UCBUSY);
+        miso[i] = UCA0RXBUF;
+    }
+
+    deselect_io();
+}
+
+unsigned char gyro_read_single_byte (unsigned char address) {
+    unsigned char mosi = 0x55;
+    unsigned char miso = 0;
+    gyro_spi(address | GYRO_READ_MASK, 1, &mosi, &miso);
+    return miso;
+}
+
+const long SUCCESS = 0;
+
+unsigned long SPI_transferLong(short int addLong,long int dataLong) {
     P1OUT &= ~BIT3; // Set CS low
     //if(Dev == TMC5160_READ){
         //0x00 - 0x0F are setup registers
@@ -94,7 +116,7 @@ unsigned long SPI_transferLong(short int addLong,long int dataLong){
 
 
 void main(void) {
-    volatile unsigned char Result = 0;
+    volatile unsigned char Result = 0x55;
     volatile unsigned char MtrRb = 0;
     volatile unsigned int TempRb = 0;
 //    int p = 6000;
@@ -113,16 +135,16 @@ void main(void) {
     adc_Init();
 
     while (1) {
-        Result = SPI_transfer(GYRO_WHO_AM_I, GYRO, GYRO_READ);
+        Result = gyro_read_single_byte(GYRO_WHO_AM_I);
         if (0x69 != Result) continue;
-        MtrRb =  SPI_transferLong(0,0);
-        if (SUCCESS != MtrRb ) continue;
-        //Start conversion
-        ADC10CTL0 |= ENC + ADC10SC;//enable and start
-        __delay_cycles(1000000);
-        while(ADC10CTL1 & ADC10BUSY);
-        TempRb = ADC10MEM;
-
+        Result = Result + 1;
+//        MtrRb =  SPI_transferLong(0,0);
+//        if (SUCCESS != MtrRb ) continue;
+//        //Start conversion
+//        ADC10CTL0 |= ENC + ADC10SC;//enable and start
+//        __delay_cycles(1000000);
+//        while(ADC10CTL1 & ADC10BUSY);
+//        TempRb = ADC10MEM;
     }
 }
 
