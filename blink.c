@@ -1,4 +1,5 @@
 #include <msp430.h>				
+#include <string.h>
 
 #define GYRO                    0x01 // Gyro device flag
 #define TMC5160                 0x02 // Motor Controller flag
@@ -42,7 +43,22 @@ void adc_Init(){
     ADC10AE0 = 0x0000;//sets input to temp sensor
 }
 
-// This just handles using the UCA0 for 2 byte command. It doesn't know which chip its talking too, or what any of the addresses mean,
+//const char* LOG_MSG =
+//    "%s:\n"
+//    "  USCI_A0_CTL0 0x%h\n"
+//    "  USCI_A0_CTL1 0x%h\n"
+//    "  UCA0BR0 0x%h\n"
+//    "  UCA0BR1 0x%h\n"
+//    "  UCA0STAT 0x%h\n"
+//    "  UCA0RXBUF 0x%h\n"
+//    "  UCA0TXBUF 0x%h\n"
+//    "\n"
+//
+//void LOG_A0 (char* msg) {
+//    LOG_printf(LOG_MSG, msg, UCA0CTL0, UCA0CTL1, UCA0BR0, UCA0BR1, UCA0STAT, UCA0RXBUF, UCA0TXBUF);
+//}
+
+// This just handles using the UCA0 for a 2 byte command. It doesn't know which chip its talking to, or what any of the addresses mean,
 // or even which direction we care about.
 void spi_chunk(unsigned char address, unsigned char* data) {
 
@@ -85,7 +101,7 @@ unsigned char gyro_who_am_i() {
 }
 
 const unsigned char FIFO_CTRL = 0x06;
-typedef struct {
+typedef struct fifo_ctrl_block {
     unsigned waterline:12; // An interrupt is raised when this many points are in the FIFO.
     unsigned reserved0:2;
     unsigned pedo_flags:2;
@@ -139,7 +155,7 @@ typedef enum {
     KHZ_6_66
 } ODR; //Samples per second. 0 means don't collect data.
 
-static const fifo_ctrl_block fifo_default_values = {
+const fifo_ctrl_block fifo_default_values = {
    .waterline = 0x0FFF,
    .acc_decimation = KEEP_ALL, // save all data points
    .gyro_decimation = KEEP_ALL, // save all data points
@@ -179,13 +195,15 @@ void spi_gyro_multibyte(unsigned char address, unsigned char* data, unsigned int
     deselect_io();
 }
 
-void set_fifo_settings (fifo_mode* settings) {
+void set_fifo_settings (const fifo_ctrl_block* settings) {
     spi_gyro_multibyte(FIFO_CTRL, (unsigned char*)settings, sizeof(fifo_ctrl_block));
 }
 
-void read_fifo_settings (fifo_mode* settings) {
+void read_fifo_settings (volatile fifo_ctrl_block* settings) {
     spi_gyro_multibyte(FIFO_CTRL | GYRO_READ_MASK, (unsigned char*)settings, sizeof(fifo_ctrl_block));
 }
+
+const char SUCCESS = 0;
 
 unsigned long SPI_transferLong(short int addLong,long int dataLong){
     P1OUT &= ~BIT3; // Set CS low
@@ -208,7 +226,33 @@ unsigned long SPI_transferLong(short int addLong,long int dataLong){
     return SUCCESS;
 }
 
+void gyro_init () {
+    volatile unsigned char result = 0xFF;
+    volatile int count = 0;
 
+    // wait until we get proper communication over spi
+    do {
+        result = gyro_who_am_i();
+        count++;
+    } while (GYRO_WHO_AM_I_EXPECTED != result);
+
+    result++;
+
+    // set up fifo
+    volatile fifo_ctrl_block readback;
+    unsigned char compare_result = 1;
+    do {
+        // just set set it something easy to recognize
+        memset((void*)&readback, (unsigned char)0, sizeof(fifo_ctrl_block));
+
+        set_fifo_settings(&fifo_default_values);
+        __delay_cycles(1000);
+        read_fifo_settings(&readback);
+
+        compare_result = memcmp((void *)&readback, (const void *)&fifo_default_values, sizeof(fifo_ctrl_block));
+
+    } while(compare_result != 0);
+}
 
 void main(void) {
     volatile unsigned char Result = 0;
@@ -231,11 +275,13 @@ void main(void) {
     DCOCTL = CALDCO_16MHZ;
 
 
-    SPI_init(); // Initialize SPI
+    spi_init(); // Initialize SPI
     adc_Init();
 
+    gyro_init();
+
     while (1) {
-        Result = SPI_transfer(GYRO_WHO_AM_I, GYRO, GYRO_READ);
+        Result = gyro_who_am_i();
         if (0x69 != Result) continue;
         MtrRb =  SPI_transferLong(0,0);
         if (SUCCESS != MtrRb ) continue;
