@@ -81,6 +81,16 @@ void gyro_spi (unsigned char address, int size, const unsigned char* mosi, unsig
     deselect_io();
 }
 
+int gyro_write_and_confirm (unsigned char address, int size, const unsigned char* mosi) {
+    volatile void readback[size];
+
+    gyro_spi (address & ~GYRO_READ_MASK, size, mosi, readback); // write data to gyro
+    _delay_cycles (1000); // wait for gyro to settle
+    gyro_spi (address | GYRO_READ_MASK, size, mosi, readback); //read data back from gyro
+
+    // compare what we got back with what we sent.
+    return memcmp((void *)&readback, (const void *)&mosi, size)
+}
 
 const unsigned char FIFO_CTRL = 0x06;
 typedef struct fifo_ctrl_block {
@@ -148,75 +158,136 @@ const fifo_ctrl_block fifo_default_values = {
    .fifo_odr = HZ_416
 };
 
-
 unsigned char gyro_read_single_byte (unsigned char address) {
     unsigned char mosi = 0x55;
     unsigned char miso = 0;
     gyro_spi(address | GYRO_READ_MASK, 1, &mosi, &miso);
     return miso;
-void set_fifo_settings (const fifo_ctrl_block* settings) {
-    spi_gyro_multibyte(FIFO_CTRL, (unsigned char*)settings, sizeof(fifo_ctrl_block));
 }
 
-void read_fifo_settings (volatile fifo_ctrl_block* settings) {
-    spi_gyro_multibyte(FIFO_CTRL | GYRO_READ_MASK, (unsigned char*)settings, sizeof(fifo_ctrl_block));
+int gyro_set_fifo_to_default () {
+    return gyro_write_and_confirm(FIFO_CTRL, sizeof(fifo_default_values), &fifo_default_values)
 }
 
-const long SUCCESS = 0;
+const unsigned char INT_CTRL = 0x0D;
+const unsigned char INT1_FTH = BIT3;
+const unsigned char INT1_DRDY_G = BIT1;
+const unsigned char INT1_DRDY_XL = BIT0;
 
-unsigned long SPI_transferLong(short int addLong,long int dataLong) {
-    P1OUT &= ~BIT3; // Set CS low
-    //if(Dev == TMC5160_READ){
-        //0x00 - 0x0F are setup registers
-        while (!(IFG2 & UCA0TXIFG));
-        UCA0TXBUF = 0x80;                     // Load data into TX buffer Motor cobtroller gives a status word after first 8 bits are sent.
-        while (!(IFG2 & UCA0TXIFG));
-        UCA0TXBUF = 0x00;                     // Load data into TX buffer. this word should clock MISO data
-        while (!(IFG2 & UCA0TXIFG));
-        UCA0TXBUF = 0x00;                     // will be write data
-        while (!(IFG2 & UCA0TXIFG));
-        UCA0TXBUF = 0x00;                     // 32bits
-        while (!(IFG2 & UCA0TXIFG));
-        UCA0TXBUF = 0x00;                     // last of clock  pulses
-        while (UCA0STAT & UCBUSY);
-        P1OUT |= BIT3; // Set CS high
-
-    //}
-    return SUCCESS;
+int gyro_set_interupt_ctrl(unsigned char int1_mask, unsigned char int2_mask) {
+    char data[2] = {int1_mask,  int2_mask};
+    return gyro_write_and_confirm (INT_CTRL, (void*)data, 2);
 }
 
-//adc init
-//enc =0
-//Internal ref off, use vcc
-//CONSEQx = 00b
+struct gyro_ctrl_block  {
+
+    //byte 0 -- CTRL1_XL
+    unsigned accel_bandwidth:2;
+    unsigned accel_scale:2;
+    unsigned accel_data_rate:4;
+
+    //byte 1 -- CTRL2_G
+    unsigned reserved0:1;
+    unsigned gyro_scale:3;
+    unsigned gyro_data_rate:4;
+
+    //byte 2 -- CTRL3_C
+    unsigned software_reset:1;
+    unsigned endian_data_selection:1;
+    unsigned enable_multi_byte_read:1;
+    unsigned spi_wires_mode:1;
+    unsigned push_pull_or_open_drain:1;
+    unsigned interrupt_polarity:1;
+    unsigned block_data_update:1;
+    unsigned boot:1;
+
+    //byte 3 -- CTRL4_C
+    unsigned stop_on_fifo_threshold:1;
+    unsigned disable_i2c:1;
+    unsigned data_read_mask:1;
+    unsigned enable_temp_fifo:1;
+    unsigned rout_int2_signals_to_int1:1;
+    unsigned gyroscope_:1;
+    unsigned endian_data_selection:1;
+    unsigned software_reset:1;
+
+    //byte 4 -- CTRL5_C
+    unsigned accel_self_test:2;
+    unsigned gyro_self_test:2;
+    unsigned reserved1:1;
+    unsigned rounding:3;
+
+    //byte 5 -- CTR6_C
+    unsigned reserved2:4;
+    unsigned accel_enable_high_performance:1;
+    unsigned gyro_enable_level_sensitive_trigger:1;
+    unsigned gyro_enable_level_sensitive_latch:1;
+    unsigned gyro_enable_edge_sensitive_trigger:1;
+
+    //byte 6 -- CTR7_G
+    unsigned reserved3:2;
+    unsigned enable_rounding:1;
+    unsigned gyro_reset_highpass_filter:1;
+    unsigned gyro_highpass_filter_cuttoff:2;
+    unsigned gyro_enable_highpass_filter:1;
+    unsigned gyro_disable_high_performance:1;
+
+    //byte 7 -- CTR8_XL
+    unsigned accel_enable_orientation_lowpass_filter:1;
+    unsigned reserved4:1;
+    unsigned accel_enable_filters:1;
+    unsigned reserved5:2;
+    unsigned accel_slope_highpass_cutoff:2;
+    unsigned accel_lowpass_selection:1;
+
+    //byte 8 -- CTRL9_XL
+    unsigned reserved6:2;
+    unsigned enable_soft_iron_correction:1;
+    unsigned accel_enable_x_axis:1;
+    unsigned accel_enable_y_axis:1;
+    unsigned accel_enable_z_axis:1;
+    unsigned reserved7:2;
+
+    //byte 9 -- CTRL10_C
+    unsigned enable_significant_motion_function:1;
+    unsigned reset_step_counter:1;
+    unsigned enable_embedded_functions_and_filters:1;
+    unsigned gyro_enable_x_axis:1;
+    unsigned gyro_enable_y_axis:1;
+    unsigned gyro_enable_z_axis:1;
+
+};
+
 
 void gyro_init () {
     volatile unsigned char result = 0xFF;
     volatile int count = 0;
+    volatile unsigned char compare_result = 1;
 
     // wait until we get proper communication over spi
     do {
-        result = gyro_who_am_i();
+        result = gyro_read_single_byte(GYRO_WHO_AM_I);
         count++;
     } while (GYRO_WHO_AM_I_EXPECTED != result);
 
     result++;
 
     // set up fifo
-    volatile fifo_ctrl_block readback;
-    unsigned char compare_result = 1;
     do {
-        // just set set it something easy to recognize
-        memset((void*)&readback, (unsigned char)0, sizeof(fifo_ctrl_block));
-
-        set_fifo_settings(&fifo_default_values);
-        __delay_cycles(1000);
-        read_fifo_settings(&readback);
-
-        compare_result = memcmp((void *)&readback, (const void *)&fifo_default_values, sizeof(fifo_ctrl_block));
-
+        compare_result = gyro_set_fifo_to_default();
+        count++;
     } while(compare_result != 0);
+
+    // set up Interrupt control
+    do {
+            compare_result = gyro_set_interupt_ctrl(INT1_FTH | INT1_DRDY_G | INT1_DRDY_XL, 0x0);
+            count++;
+    } while(compare_result != 0);
+
+    // turn on acc and gyro sensors
+
 }
+
 
 void main(void) {
     volatile unsigned char Result = 0x55;
