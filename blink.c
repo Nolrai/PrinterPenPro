@@ -1,5 +1,6 @@
 #include <msp430.h>				
 #include <string.h>
+#include <stdlib.h>
 
 #define GYRO                    0x01 // Gyro device flag
 #define TMC5160                 0x02 // Motor Controller flag
@@ -81,17 +82,44 @@ void gyro_spi (unsigned char address, int size, const unsigned char* mosi, unsig
     deselect_io();
 }
 
-int gyro_write_and_confirm (unsigned char address, int size, const unsigned char* mosi) {
-    unsigned char readback[size];
+typedef struct {
+    long whichByte;
+    unsigned actual:8;
+    unsigned expected:8;
+} diff_location;
+
+const diff_location NO_ERROR = {0,0,0};
+const diff_location OTHER_ERROR = {-1,0,0};
+
+diff_location gyro_write_and_confirm (unsigned char address, volatile int size, const unsigned char* mosi) {
+    unsigned char* readback = malloc(size);
+    diff_location ret = NO_ERROR;
+
+    if(0 == size) {
+        exit(-1);
+    }
 
     gyro_spi (address & ~GYRO_READ_MASK, size, mosi, readback); // write data to gyro
     _delay_cycles (1000); // wait for gyro to settle
     gyro_spi (address | GYRO_READ_MASK, size, mosi, readback); //read data back from gyro
 
-    // compare what we got back with what we sent.
-    return memcmp((void *)&readback, (const void *)&mosi, size);
-}
+    unsigned int i;
+    for (i = size - 1; i != 0; i--) {
+        if (readback[i] != mosi[i]) {
+            ret.whichByte |= 1L << i;
+            ret.actual = readback[i];
+            ret.expected = mosi[i];
+        }
+    }
 
+    free(readback);
+
+    if (0 == size) {
+        exit(-1);
+    }
+    return ret;
+}
+  // 00000000000000011110100000000000b
 const unsigned char FIFO_CTRL = 0x06;
 typedef struct fifo_ctrl_block {
     unsigned waterline:12; // An interrupt is raised when this many points are in the FIFO.
@@ -147,7 +175,7 @@ typedef enum {
     KHZ_6_66
 } ODR; //Samples per second. 0 means don't collect data.
 
-const fifo_ctrl_block fifo_default_values = {
+const fifo_ctrl_block fifo_values = {
    .waterline = 0x0FFF,
    .acc_decimation = KEEP_ALL, // save all data points
    .gyro_decimation = KEEP_ALL, // save all data points
@@ -160,13 +188,13 @@ const fifo_ctrl_block fifo_default_values = {
 
 unsigned char gyro_read_single_byte (unsigned char address) {
     unsigned char mosi = 0x55;
-    unsigned char miso = 0;
+    unsigned char miso = 0x55;
     gyro_spi(address | GYRO_READ_MASK, 1, &mosi, &miso);
     return miso;
 }
 
-int gyro_set_fifo_to_default () {
-    return gyro_write_and_confirm(FIFO_CTRL, sizeof(fifo_default_values), (const unsigned char*)&fifo_default_values);
+diff_location gyro_set_fifo_to_default () {
+    return gyro_write_and_confirm(FIFO_CTRL, sizeof(fifo_ctrl_block), (const unsigned char*)&fifo_values);
 }
 
 const unsigned char INT_CTRL = 0x0D;
@@ -174,14 +202,23 @@ const unsigned char INT1_FTH = BIT3;
 const unsigned char INT1_DRDY_G = BIT1;
 const unsigned char INT1_DRDY_XL = BIT0;
 
-int gyro_set_interupt_ctrl(unsigned char int1_mask, unsigned char int2_mask) {
+diff_location gyro_set_interupt_ctrl(unsigned char int1_mask, unsigned char int2_mask) {
     char data[2] = {int1_mask,  int2_mask};
     return gyro_write_and_confirm (INT_CTRL, 2, (void*)data);
 }
 
-// I think the "__attribute__((__packed__))" isn't needed because all the members are bit fields, but I am not sure.
+typedef enum {
+  DPS_250 = 0b00,
+  DPS_500 = 0b01,
+  DPS_1000 = 0b10,
+  DPS_2000 = 0b11
+} gyro_scale;
+
+// Main control block (registers 0x10 - 0x1A inclusive)
+const unsigned char CTR_BLOCK = 0x10;
 
 // these are grouped by byte, not by function. So some controls are in sub-structs whose names don't seem to fit.
+// I think the "__attribute__((__packed__))" isn't needed because all the members are bit fields, but I am not sure.
 
 // CTRL1_XL
 struct __attribute__((__packed__)) accel_data_rate_ctrl {
@@ -194,7 +231,7 @@ struct __attribute__((__packed__)) accel_data_rate_ctrl {
 // CTRL2_G
 struct __attribute__((__packed__)) gyro_data_rate_ctrl {
     //byte 1 -- CTRL2_G
-    unsigned reserved0:1;
+    unsigned reserved:1;
     unsigned gyro_scale:3;
     unsigned gyro_data_rate:4;
 };
@@ -228,7 +265,9 @@ struct __attribute__((__packed__)) rounding_and_self_test {
     unsigned accel_self_test:2;
     unsigned gyro_self_test:2;
     unsigned reserved:1;
-    unsigned rounding:3;
+    unsigned include_accel;
+    unsigned include_gyro;
+    unsigned include_hub; //Note if accel is off and gyro and hub are both on, instead both hubs 1 and 2 and the accel and the gyro are included in the rotation.
 };
 
 // CTRL6_C
@@ -280,7 +319,9 @@ struct __attribute__((__packed__)) gyro_enable {
     unsigned gyro_enable_z_axis:1;
 };
 
-struct __attribute__((__packed__)) gyro_ctrl_block  {
+const unsigned char CTRL_BLOCK = 0x10;
+
+typedef struct __attribute__((__packed__)) {
     //byte 0
     struct accel_data_rate_ctrl accel_data_rate_ctrl;
 
@@ -310,41 +351,161 @@ struct __attribute__((__packed__)) gyro_ctrl_block  {
 
     //byte 9 -- CTRL10_C
     struct gyro_enable gyro_enable;
+} gyro_ctrl_block;
+
+// the weird values/order is what the doc says.
+enum accel_scale {
+    PLUS_MINUS_2 = 0b00,
+    PLUS_MINUS_16 = 0b01,
+    PLUS_MINUS_4 = 0b10,
+    PLUS_MINUS_8 = 0b11
 };
 
+const unsigned char all_zero_arr[sizeof(gyro_ctrl_block)] = {0, 0, 0, 0, 0,
+                                                    0, 0, 0, 0, 0};
 
-void gyro_init () {
+diff_location gyro_set_ctrl_block() {
+    gyro_ctrl_block readback;
+    int all_zero, reserved_all_zero;
+
+    memset((unsigned char*)&readback, 0x55, sizeof(readback));
+
+    gyro_spi(CTRL_BLOCK | GYRO_READ_MASK,
+             sizeof(gyro_ctrl_block),
+             all_zero_arr,
+             (unsigned char *)&readback);
+
+    all_zero = 0 == memcmp(all_zero_arr,
+                           (const char *)&readback,
+                           sizeof(gyro_ctrl_block));
+    reserved_all_zero =
+//        (0 == readback.accel_enable.reserved0) &&
+//        (0 == readback.accel_enable.reserved1) &&
+        (0 == readback.accel_filters.reserved0) &&
+        (0 == readback.accel_filters.reserved1) &&
+        (0 == readback.ctrl_misc.reserved) &&
+        (0 == readback.gyro_data_rate_ctrl.reserved) &&
+        (0 == readback.gyro_filters.reserved) &&
+        (0 == readback.hp_and_triggers.reserved) &&
+        (0 == readback.rounding_and_self_test.reserved);
+
+
+
+    // We got valid data back.
+    if (!all_zero && reserved_all_zero) {
+
+        // CTRL1_XL
+        readback.accel_data_rate_ctrl.accel_data_rate = HZ_208;
+        readback.accel_data_rate_ctrl.accel_scale = PLUS_MINUS_4;
+
+        // CTRL2_G
+        readback.gyro_data_rate_ctrl.gyro_data_rate = HZ_208;
+        readback.gyro_data_rate_ctrl.gyro_scale = DPS_500;
+
+        // CTRL3_C
+        readback.comms_ctrl.block_data_update = 0;
+        readback.comms_ctrl.enable_multi_byte_read = 1;
+        // readback.comms_ctrl.push_pull_or_open_drain = 0 // PUSH_PULL; CSPAM: I don't know what this means. Ask Darren.
+
+        // CTRL4_C
+        readback.ctrl_misc.accel_enable_bandwidth_selection = 0;
+        readback.ctrl_misc.rout_int2_signals_to_int1 = 1;
+        readback.ctrl_misc.data_read_mask = 1;
+        readback.ctrl_misc.disable_i2c = 1;
+        readback.ctrl_misc.stop_on_fifo_threshold = 0;
+
+        // CTRL5_C
+        readback.rounding_and_self_test.include_accel = 1;
+        readback.rounding_and_self_test.include_gyro = 1;
+        readback.rounding_and_self_test.include_hub = 0;
+        readback.rounding_and_self_test.accel_self_test = 0;
+        readback.rounding_and_self_test.gyro_self_test = 0;
+
+        // CTRL6_C
+        readback.hp_and_triggers.accel_dsable_high_performance = 0; // Enable high performance.
+        readback.hp_and_triggers.gyro_enable_edge_sensitive_trigger = 0;
+        readback.hp_and_triggers.gyro_enable_level_sensitive_latch = 0;
+        readback.hp_and_triggers.gyro_enable_level_sensitive_trigger = 0;
+
+        // CTRL7_G
+        readback.gyro_filters.disable_high_performance = 0; //Enable high performance.
+        readback.gyro_filters.enable_highpass_filter = 1;
+
+        // CTR8_XL
+        readback.accel_filters.lowpass_selection = 1; // Use the low-pass filter for the XL output.
+        readback.accel_filters.enable_orientation_lowpass_filter = 1; // Use low-pass filtered data for the orientation sensing.
+
+        // CTR9_XL
+        readback.accel_enable.accel_enable_x_axis = 1;
+        readback.accel_enable.accel_enable_y_axis = 1;
+        readback.accel_enable.accel_enable_z_axis = 1;
+        readback.accel_enable.enable_soft_iron_correction = 1; //This might not do anything because we haven't set the MASTER_CONFIG
+
+        // CTR10_C
+        readback.gyro_enable.enable_embedded_functions_and_filters = 0;
+        readback.gyro_enable.enable_significant_motion_function = 1;
+        readback.gyro_enable.gyro_enable_x_axis = 1;
+        readback.gyro_enable.gyro_enable_y_axis = 1;
+        readback.gyro_enable.gyro_enable_z_axis = 1;
+
+        return gyro_write_and_confirm(CTRL_BLOCK, sizeof(gyro_ctrl_block), (unsigned char *)&readback);
+    } else {
+        return OTHER_ERROR;
+    }
+}
+
+int gyro_init () {
     volatile unsigned char result = 0xFF;
-    volatile int count = 0;
-    volatile unsigned char compare_result = 1;
+    volatile signed char count = 0, count2 = 0;
+    volatile diff_location compare_result = OTHER_ERROR;
 
     // wait until we get proper communication over spi
     do {
         result = gyro_read_single_byte(GYRO_WHO_AM_I);
         count++;
+        if (count < 0) {
+            count = 0;
+            count2++;
+        }
     } while (GYRO_WHO_AM_I_EXPECTED != result);
 
-    result++;
-
+    count = 0;
+    count2 = 0;
     // set up fifo
     do {
         compare_result = gyro_set_fifo_to_default();
         count++;
-    } while(compare_result != 0);
+        if (count < 0) {
+            count = 0;
+            count2++;
+        }
+    } while(compare_result.whichByte != 0);
 
+    count = 0;
+    count2 = 0;
     // set up Interrupt control
     do {
         compare_result = gyro_set_interupt_ctrl(INT1_FTH | INT1_DRDY_G | INT1_DRDY_XL, 0x0);
         count++;
-    } while(compare_result != 0);
+        if (count < 0) {
+            count = 0;
+            count2++;
+        }
+    } while(compare_result.whichByte != 0);
 
+    count = 0;
+    count2 = 0;
     // set main ctrl block
     do {
-        compare_result = 1;
-        volatile struct gyro_ctrl_block gyro_ctrl_block;
-        gyro_get_ctrl_block(&gyro_ctrl_block);
+        compare_result = gyro_set_ctrl_block();
+        count++;
+        if (count < 0) {
+            count = 0;
+            count2++;
+        }
+    } while (compare_result.whichByte != 0 && count2 > 0);
 
-    } while (compare_result != 0);
+    return 0;
 }
 
 
@@ -364,7 +525,6 @@ void main(void) {
 
     SPI_init(); // Initialize SPI
     adc_Init();
-
     gyro_init();
 
     while (1) {
